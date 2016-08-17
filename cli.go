@@ -29,15 +29,17 @@ func loadConfigFromFile(cliApp *CliApp) error {
 }
 
 type CliConfig struct {
-	Server  ServerConfig  `yaml:"server"`
-	LevelDB LevelDBConfig `yaml:"leveldb"`
-	Email   EmailConfig   `yaml:"email"`
+	Server        ServerConfig             `yaml:"server"`
+	LevelDB       LevelDBConfig            `yaml:"leveldb"`
+	Email         EmailConfig              `yaml:"email"`
+	Subscriptions SubscriptionServerConfig `yaml:"subscriptions"`
 }
 
 type CliApp struct {
 	*cli.App
-	Config     *CliConfig
-	ConfigPath string
+	Config           *CliConfig
+	ConfigPath       string
+	UseSubscriptions bool
 }
 
 func (cliApp *CliApp) RunServer(context *cli.Context) error {
@@ -53,7 +55,7 @@ func (cliApp *CliApp) RunServer(context *cli.Context) error {
 	}
 
 	// Initialize app instance
-	app, err := NewServer(
+	server, err := NewServer(
 		&LevelDBStorage{LevelDBConfig: cliApp.Config.LevelDB},
 		&EmailSender{cliApp.Config.Email},
 		*templates,
@@ -64,8 +66,16 @@ func (cliApp *CliApp) RunServer(context *cli.Context) error {
 		return err
 	}
 
+	var handler http.Handler
+
+	if cliApp.UseSubscriptions {
+		handler = NewSubscriptionServer(server, cliApp.Config.Subscriptions)
+	} else {
+		handler = server
+	}
+
 	// Add rate limiting middleWare
-	handler := RateLimit(app, map[Route]RateQuota{
+	handler = RateLimit(handler, map[Route]RateQuota{
 		Route{"POST", "/auth/"}:    RateQuota{PerMin(1), 0},
 		Route{"PUT", "/auth/"}:     RateQuota{PerMin(1), 0},
 		Route{"DELETE", "/store/"}: RateQuota{PerMin(1), 0},
@@ -75,7 +85,7 @@ func (cliApp *CliApp) RunServer(context *cli.Context) error {
 	handler = Cors(handler)
 
 	// Clean up after method returns (should never happen under normal circumstances but you never know)
-	defer app.CleanUp()
+	defer server.CleanUp()
 
 	// Handle INTERRUPT and KILL signals
 	c := make(chan os.Signal, 1)
@@ -83,7 +93,7 @@ func (cliApp *CliApp) RunServer(context *cli.Context) error {
 	go func() {
 		s := <-c
 		log.Printf("Received %v signal. Exiting...", s)
-		app.CleanUp()
+		server.CleanUp()
 		os.Exit(0)
 	}()
 
@@ -288,6 +298,19 @@ func NewCliApp() *CliApp {
 					Value:       "",
 					EnvVar:      "PC_TLS_KEY",
 					Destination: &config.Server.TLSKey,
+				},
+				cli.BoolFlag{
+					Name:        "use-subscriptions",
+					Usage:       "Put SubscriptionServer in front of data server",
+					EnvVar:      "PC_USE_SUBSCRIPTIONS",
+					Destination: &cliApp.UseSubscriptions,
+				},
+				cli.StringFlag{
+					Name:        "ios-shared-secret",
+					Usage:       "'Shared Secret' used for authenticating with itunes",
+					Value:       "",
+					EnvVar:      "PC_IOS_SHARED_SECRET",
+					Destination: &config.Subscriptions.IOSSharedSecret,
 				},
 			},
 			Action: cliApp.RunServer,
